@@ -1,0 +1,49 @@
+name: Sync main into release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-branch:
+        description: "Target release branch, e.g. release/v9.10"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # Only repo admins may run the sync. workflow_dispatch is open to anyone
+      # with write access, so the gate lives here.
+      - name: Require admin actor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          perm=$(gh api "repos/${{ github.repository }}/collaborators/${{ github.actor }}/permission" --jq .permission)
+          echo "actor=${{ github.actor }} permission=$perm"
+          [ "$perm" = "admin" ] || { echo "::error::${{ github.actor }} is not a repo admin"; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge main into the release branch
+        run: |
+          git config user.name "release-sync"
+          git config user.email "release-sync@users.noreply.github.com"
+          git checkout "${{ inputs.release-branch }}"
+          git merge --no-ff origin/main -m "Sync main into ${{ inputs.release-branch }} (run ${{ github.run_id }}, by ${{ github.actor }})"
+
+      # Push over SSH with the deploy key — the ruleset's bypass actor.
+      # The default GITHUB_TOKEN cannot bypass rulesets.
+      - name: Push via deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.SYNC_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/sync_key
+          chmod 600 ~/.ssh/sync_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/sync_key -o IdentitiesOnly=yes"
+          git push "git@github.com:${{ github.repository }}.git" "HEAD:${{ inputs.release-branch }}"
